@@ -34,7 +34,7 @@ use failure::LOCAL_STDERR;
 use fmt;
 use io::{Reader, Writer, IoResult, IoError, OtherIoError, Buffer,
          standard_error, EndOfFile, LineBufferedWriter, BufferedReader};
-use kinds::Send;
+use kinds::{Sync, Send};
 use libc;
 use mem;
 use option::Option;
@@ -98,11 +98,20 @@ thread_local! {
     }
 }
 
+#[deriving(Clone)]
+struct RaceBox(Arc<Mutex<BufferedReader<StdReader>>>);
+
+unsafe impl Send for RaceBox {}
+unsafe impl Sync for RaceBox {}
+
 /// A synchronized wrapper around a buffered reader from stdin
 #[deriving(Clone)]
 pub struct StdinReader {
-    inner: Arc<Mutex<BufferedReader<StdReader>>>,
+    inner: RaceBox,
 }
+
+unsafe impl Send for StdinReader {}
+unsafe impl Sync for StdinReader {}
 
 /// A guard for exclusive access to `StdinReader`'s internal `BufferedReader`.
 pub struct StdinReaderGuard<'a> {
@@ -138,7 +147,7 @@ impl StdinReader {
     /// ```
     pub fn lock<'a>(&'a mut self) -> StdinReaderGuard<'a> {
         StdinReaderGuard {
-            inner: self.inner.lock()
+            inner: self.inner.0.lock()
         }
     }
 
@@ -147,7 +156,7 @@ impl StdinReader {
     /// The read is performed atomically - concurrent read calls in other
     /// threads will not interleave with this one.
     pub fn read_line(&mut self) -> IoResult<String> {
-        self.inner.lock().read_line()
+        self.inner.0.lock().read_line()
     }
 
     /// Like `Buffer::read_until`.
@@ -155,7 +164,7 @@ impl StdinReader {
     /// The read is performed atomically - concurrent read calls in other
     /// threads will not interleave with this one.
     pub fn read_until(&mut self, byte: u8) -> IoResult<Vec<u8>> {
-        self.inner.lock().read_until(byte)
+        self.inner.0.lock().read_until(byte)
     }
 
     /// Like `Buffer::read_char`.
@@ -163,13 +172,13 @@ impl StdinReader {
     /// The read is performed atomically - concurrent read calls in other
     /// threads will not interleave with this one.
     pub fn read_char(&mut self) -> IoResult<char> {
-        self.inner.lock().read_char()
+        self.inner.0.lock().read_char()
     }
 }
 
 impl Reader for StdinReader {
     fn read(&mut self, buf: &mut [u8]) -> IoResult<uint> {
-        self.inner.lock().read(buf)
+        self.inner.0.lock().read(buf)
     }
 
     // We have to manually delegate all of these because the default impls call
@@ -177,23 +186,23 @@ impl Reader for StdinReader {
     // incur the costs of repeated locking).
 
     fn read_at_least(&mut self, min: uint, buf: &mut [u8]) -> IoResult<uint> {
-        self.inner.lock().read_at_least(min, buf)
+        self.inner.0.lock().read_at_least(min, buf)
     }
 
     fn push_at_least(&mut self, min: uint, len: uint, buf: &mut Vec<u8>) -> IoResult<uint> {
-        self.inner.lock().push_at_least(min, len, buf)
+        self.inner.0.lock().push_at_least(min, len, buf)
     }
 
     fn read_to_end(&mut self) -> IoResult<Vec<u8>> {
-        self.inner.lock().read_to_end()
+        self.inner.0.lock().read_to_end()
     }
 
     fn read_le_uint_n(&mut self, nbytes: uint) -> IoResult<u64> {
-        self.inner.lock().read_le_uint_n(nbytes)
+        self.inner.0.lock().read_le_uint_n(nbytes)
     }
 
     fn read_be_uint_n(&mut self, nbytes: uint) -> IoResult<u64> {
-        self.inner.lock().read_be_uint_n(nbytes)
+        self.inner.0.lock().read_be_uint_n(nbytes)
     }
 }
 
@@ -221,7 +230,7 @@ pub fn stdin() -> StdinReader {
                 BufferedReader::new(stdin_raw())
             };
             let stdin = StdinReader {
-                inner: Arc::new(Mutex::new(stdin))
+                inner: RaceBox(Arc::new(Mutex::new(stdin)))
             };
             STDIN = mem::transmute(box stdin);
 
